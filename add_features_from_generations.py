@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Chunk-read generations CSVs and add per-user features (same logic as churn_importance_by_time_bin).
+Chunk-read generations CSVs and append generation features as new columns on the user tables.
 
-Reads from data/preprocessed/train|test/:
-  - train_users.csv, train_users_properties.csv, train_users_generations.csv
-  - test_users.csv, test_users_properties.csv, test_users_generations.csv
+By default **overwrites**:
+  - data/train/train_users.csv
+  - data/test/test_users.csv
 
-Writes merged user tables with generation features (default: data/preprocessed/cache/).
+Still reads properties + generations from the same train/ and test/ folders (for subscription
+time and chunked generation rows). Same aggregation logic as churn_importance_by_time_bin.
+
+New columns (if missing; existing names are replaced):
+  total_generations, nsfw_rate, success_ratio, gen_delta_day1_minus_day14, log1p_total_gen
 """
 
 from __future__ import annotations
@@ -22,6 +26,14 @@ import pandas as pd
 from dateutil.parser import isoparse
 
 CHUNK = 300_000
+
+GEN_FEATURE_COLS = [
+    "total_generations",
+    "nsfw_rate",
+    "success_ratio",
+    "gen_delta_day1_minus_day14",
+    "log1p_total_gen",
+]
 
 
 def read_csv_drop_index(path: Path, **kwargs) -> pd.DataFrame:
@@ -131,63 +143,80 @@ def load_base_users_props(users_path: Path, props_path: Path) -> pd.DataFrame:
     return base
 
 
+def merge_gen_into_users(users_df: pd.DataFrame, gen_aggregated: pd.DataFrame) -> pd.DataFrame:
+    """Left-join generation columns onto the original user rows; drop old gen cols if present."""
+    out = users_df.copy()
+    for c in GEN_FEATURE_COLS:
+        if c in out.columns:
+            out = out.drop(columns=[c])
+    part = gen_aggregated[["user_id"] + GEN_FEATURE_COLS].drop_duplicates(subset=["user_id"], keep="first")
+    return out.merge(part, on="user_id", how="left")
+
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Add generation-based features from preprocessed CSVs.")
-    p.add_argument(
-        "--input-dir",
-        type=Path,
-        default=Path("data/preprocessed"),
-        help="Root containing train/ and test/ (same layout as preprocess_data output).",
+    root = Path("data")
+    p = argparse.ArgumentParser(
+        description="Append generation feature columns onto train_users.csv and test_users.csv."
     )
     p.add_argument(
-        "--output-dir",
+        "--train-users",
         type=Path,
-        default=None,
-        help="Where to write CSVs (default: INPUT_DIR/cache).",
+        default=root / "train" / "train_users.csv",
+        help="Train user table to update in place.",
     )
     p.add_argument(
-        "--train-out",
+        "--test-users",
         type=Path,
-        default=None,
-        help="Train output CSV path (default: OUTPUT_DIR/train_users_with_generations.csv).",
+        default=root / "test" / "test_users.csv",
+        help="Test user table to update in place.",
     )
     p.add_argument(
-        "--test-out",
+        "--train-props",
         type=Path,
-        default=None,
-        help="Test output CSV path (default: OUTPUT_DIR/test_users_with_generations.csv).",
+        default=root / "train" / "train_users_properties.csv",
+        help="Train properties (subscription_start_date for timing).",
+    )
+    p.add_argument(
+        "--test-props",
+        type=Path,
+        default=root / "test" / "test_users_properties.csv",
+        help="Test properties.",
+    )
+    p.add_argument(
+        "--train-gen",
+        type=Path,
+        default=root / "train" / "train_users_generations.csv",
+        help="Train generations log.",
+    )
+    p.add_argument(
+        "--test-gen",
+        type=Path,
+        default=root / "test" / "test_users_generations.csv",
+        help="Test generations log.",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Compute features and print stats but do not write CSVs.",
     )
     args = p.parse_args()
 
-    root = args.input_dir.resolve()
-    train_dir = root / "train"
-    test_dir = root / "test"
+    train_users_path = args.train_users.resolve()
+    test_users_path = args.test_users.resolve()
+    train_props = args.train_props.resolve()
+    test_props = args.test_props.resolve()
+    train_gen = args.train_gen.resolve()
+    test_gen = args.test_gen.resolve()
 
-    train_users = train_dir / "train_users.csv"
-    train_props = train_dir / "train_users_properties.csv"
-    train_gen = train_dir / "train_users_generations.csv"
-
-    test_users = test_dir / "test_users.csv"
-    test_props = test_dir / "test_users_properties.csv"
-    test_gen = test_dir / "test_users_generations.csv"
-
-    for path in (train_users, train_props, train_gen, test_users, test_props, test_gen):
+    for path in (train_users_path, test_users_path, train_props, test_props, train_gen, test_gen):
         if not path.is_file():
             print(f"Missing file: {path}", file=sys.stderr)
             sys.exit(1)
 
-    out_dir = (args.output_dir or (root / "cache")).resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    train_out = args.train_out or (out_dir / "train_users_with_generations.csv")
-    test_out = args.test_out or (out_dir / "test_users_with_generations.csv")
-
-    print("Loading train users + properties...")
-    base_train = load_base_users_props(train_users, train_props)
-    if "churn_status" in base_train.columns:
-        base_train["churn_binary"] = base_train["churn_status"].isin(["vol_churn", "invol_churn"]).astype(int)
-
+    print("Loading train users + properties (for aggregation)...")
+    base_train = load_base_users_props(train_users_path, train_props)
     print("Loading test users + properties...")
-    base_test = load_base_users_props(test_users, test_props)
+    base_test = load_base_users_props(test_users_path, test_props)
 
     print("Aggregating train generations (chunked)...")
     base_train = aggregate_generations(base_train, train_gen)
@@ -197,10 +226,23 @@ def main() -> None:
     print("train total_generations median:", float(np.median(base_train["total_generations"])))
     print("test total_generations median:", float(np.median(base_test["total_generations"])))
 
-    base_train.to_csv(train_out, index=False)
-    base_test.to_csv(test_out, index=False)
-    print("Wrote:", train_out)
-    print("Wrote:", test_out)
+    users_train = read_csv_drop_index(train_users_path)
+    users_test = read_csv_drop_index(test_users_path)
+
+    out_train = merge_gen_into_users(users_train, base_train)
+    out_test = merge_gen_into_users(users_test, base_test)
+
+    if args.dry_run:
+        print("Dry run: not writing files.")
+        print("Train columns:", list(out_train.columns))
+        print("Test columns:", list(out_test.columns))
+        return
+
+    out_train.to_csv(train_users_path, index=False)
+    out_test.to_csv(test_users_path, index=False)
+    print("Updated:", train_users_path)
+    print("Updated:", test_users_path)
+    print("Appended columns:", GEN_FEATURE_COLS)
 
 
 if __name__ == "__main__":
