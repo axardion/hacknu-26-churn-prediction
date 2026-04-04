@@ -5,8 +5,8 @@ auxiliary_train_file = "data/preprocessed/train/train_users_properties.csv"
 main_test_file = "data/preprocessed/test/test_users.csv"
 auxiliary_test_file = "data/preprocessed/test/test_users_properties.csv"
 
-train_countries_file = "data/train_countries.csv"
-test_countries_file = "data/test_countries.csv"
+train_countries_file = "data/countries.csv"
+test_countries_file = "data/countries.csv"
 
 user_id_column = "user_id"
 country_code_column = "country_code"

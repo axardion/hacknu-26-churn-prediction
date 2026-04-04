@@ -1,7 +1,6 @@
 import csv
 import json
 import math
-import os
 import time
 import urllib.request
 from collections import defaultdict
@@ -9,6 +8,10 @@ from collections import defaultdict
 import pycountry
 
 folder = "data/preprocessed"
+countries_csv = f"{folder}/train/train_users_properties.csv"
+payment_csv = f"{folder}/train/train_users.csv"
+country_column = "country_code"
+churn_column = "churn_status"
 min_data_points_by_country = 0
 
 def decode_country(code):
@@ -78,64 +81,31 @@ def fetch_wb(indicator, country_codes, start_year=2020, end_year=2025):
     print(f"  {indicator}: got data for {len(results)} countries")
     return results
 
-def load_country_lookup(csv_path):
-    lookup = {}
-    with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            uid = row.get("user_id") or row.get("id") or list(row.values())[0]
-            lookup[uid] = row["country_code"]
-    return lookup
-
-def load_churn_rows(csv_path):
-    rows = []
-    with open(csv_path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    return rows
-
-train_country_lookup = load_country_lookup(f"{folder}/train/train_users_properties.csv")
-train_churn_rows = load_churn_rows(f"{folder}/train/train_users.csv")
-test_country_lookup = load_country_lookup(f"{folder}/test/test_users_properties.csv")
-test_churn_rows = load_churn_rows(f"{folder}/test/test_users.csv")
-
-env_configs = {
-    "train": {
-        "country_lookup": train_country_lookup,
-        "churn_rows": train_churn_rows,
-    },
-    "test": {
-        "country_lookup": {**train_country_lookup, **test_country_lookup},
-        "churn_rows": train_churn_rows + test_churn_rows,
-    },
-}
-
-def build_stats(country_lookup, churn_rows):
-    s = defaultdict(lambda: {"vol_churn": 0, "invol_churn": 0, "retained": 0})
-    for row in churn_rows:
+country_lookup = {}
+with open(countries_csv, newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
         uid = row.get("user_id") or row.get("id") or list(row.values())[0]
-        status = row["churn_status"]
+        country_lookup[uid] = row[country_column]
+
+stats = defaultdict(lambda: {"vol_churn": 0, "invol_churn": 0, "retained": 0})
+
+with open(payment_csv, newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        uid = row.get("user_id") or row.get("id") or list(row.values())[0]
+        status = row[churn_column]
         country = country_lookup.get(uid)
         if country is None:
             continue
         if status == "vol_churn":
-            s[country]["vol_churn"] += 1
+            stats[country]["vol_churn"] += 1
         elif status == "invol_churn":
-            s[country]["invol_churn"] += 1
+            stats[country]["invol_churn"] += 1
         elif status == "not_churned":
-            s[country]["retained"] += 1
-    return s
+            stats[country]["retained"] += 1
 
-all_country_codes = set()
-all_stats = {}
-for env_name, cfg in env_configs.items():
-    st = build_stats(cfg["country_lookup"], cfg["churn_rows"])
-    all_stats[env_name] = st
-    all_country_codes.update(c.upper() for c in st.keys())
-    print(f"{env_name}: {len(st)} countries, {len(cfg['churn_rows'])} churn rows")
-
-unique_codes = list(dict.fromkeys(all_country_codes))
+unique_codes = list(dict.fromkeys(c.upper() for c in stats.keys()))
 wb_codes = [WB_REMAP.get(c, c) for c in unique_codes if WB_REMAP.get(c, c) is not None]
 wb_codes = [c for c in dict.fromkeys(wb_codes) if len(c) == 2 and c.isalpha()]
 
@@ -223,6 +193,61 @@ INSTAGRAM_USERS = {
     "SR": 200000, "BZ": 100000, "CM": 1500000, "SN": 1200000, "CI": 1000000,
 }
 
+data = []
+econ_keys = set(all_econ["gdp"].keys())
+print(f"Econ data available for: {sorted(econ_keys)[:20]}...")
+print(f"Sample econ values: {dict(list(all_econ['gdp'].items())[:5])}")
+
+for c, s in stats.items():
+    total = s["vol_churn"] + s["invol_churn"] + s["retained"]
+    if total < min_data_points_by_country:
+        continue
+    vol_pct = round(s["vol_churn"] / total * 100, 2) if total else 0
+
+    wb = WB_REMAP.get(c.upper(), c.upper())
+    if c in ["JP", "US", "DE"]:
+        print(f"  Debug {c}: wb={wb}, in econ={wb in econ_keys}, gdp={all_econ['gdp'].get(wb)}")
+
+    row = {
+        "country_code": c,
+        "country_name": decode_country(c),
+        "vol_churn": s["vol_churn"],
+        "invol_churn": s["invol_churn"],
+        "retained": s["retained"],
+        "vol_churn_pct": vol_pct,
+        "invol_churn_pct": round(s["invol_churn"] / total * 100, 2) if total else 0,
+        "retained_pct": round(s["retained"] / total * 100, 2) if total else 0,
+        "_sort": vol_pct * math.sqrt(s["vol_churn"]),
+    }
+
+    if wb is None:
+        row.update({"gdp": "", "gdp_growth_pct": "", "gdp_per_capita": "", "gdp_per_capita_growth_pct": "", "population": "", "data_year": ""})
+    else:
+        gdp_info = all_econ["gdp"].get(wb)
+        row["data_year"] = gdp_info[0] if gdp_info else ""
+        row["gdp"] = gdp_info[1] if gdp_info and gdp_info[1] is not None else ""
+        for key in ["gdp_growth_pct", "gdp_per_capita", "gdp_per_capita_growth_pct"]:
+            info = all_econ[key].get(wb)
+            row[key] = round(info[1], 2) if info and info[1] is not None else ""
+        pop = all_econ["population"].get(wb)
+        row["population"] = int(pop[1]) if pop and pop[1] is not None else ""
+
+    cc_upper = c.upper()
+    row["tiktok_users"] = TIKTOK_USERS.get(cc_upper, "")
+    row["instagram_users"] = INSTAGRAM_USERS.get(cc_upper, "")
+
+    data.append(row)
+
+data.sort(key=lambda r: r["_sort"], reverse=True)
+
+for r in data:
+    if r["country_code"] in ["JP", "US", "DE"]:
+        print(f"  Row {r['country_code']}: gdp={r.get('gdp')}, pop={r.get('population')}, growth={r.get('gdp_growth_pct')}")
+        break
+
+output = "data/countries.csv"
+import os
+os.makedirs("output", exist_ok=True)
 fieldnames = [
     "country_code", "country_name",
     "vol_churn", "invol_churn", "retained",
@@ -230,68 +255,9 @@ fieldnames = [
     "population", "gdp", "gdp_growth_pct", "gdp_per_capita", "gdp_per_capita_growth_pct", "data_year",
     "tiktok_users", "instagram_users",
 ]
+with open(output, newline="", mode="w", encoding="utf-8") as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(data)
 
-columns_to_add = ["vol_churn", "invol_churn", "retained"]
-col_indices = [fieldnames.index(c) for c in columns_to_add]
-
-def total_dp(row_values, indices):
-    return sum(float(row_values[i]) for i in indices)
-
-os.makedirs("data", exist_ok=True)
-
-for env_name, stats in all_stats.items():
-    print(f"\n=== Generating {env_name}_countries.csv ===")
-
-    data = []
-    for c, s in stats.items():
-        total = s["vol_churn"] + s["invol_churn"] + s["retained"]
-        if total < min_data_points_by_country:
-            continue
-        vol_pct = round(s["vol_churn"] / total * 100, 2) if total else 0
-
-        wb = WB_REMAP.get(c.upper(), c.upper())
-
-        row = {
-            "country_code": c,
-            "country_name": decode_country(c),
-            "vol_churn": s["vol_churn"],
-            "invol_churn": s["invol_churn"],
-            "retained": s["retained"],
-            "vol_churn_pct": vol_pct,
-            "invol_churn_pct": round(s["invol_churn"] / total * 100, 2) if total else 0,
-            "retained_pct": round(s["retained"] / total * 100, 2) if total else 0,
-            "_sort": vol_pct * math.sqrt(s["vol_churn"]),
-        }
-
-        if wb is None:
-            row.update({"gdp": "", "gdp_growth_pct": "", "gdp_per_capita": "", "gdp_per_capita_growth_pct": "", "population": "", "data_year": ""})
-        else:
-            gdp_info = all_econ["gdp"].get(wb)
-            row["data_year"] = gdp_info[0] if gdp_info else ""
-            row["gdp"] = gdp_info[1] if gdp_info and gdp_info[1] is not None else ""
-            for key in ["gdp_growth_pct", "gdp_per_capita", "gdp_per_capita_growth_pct"]:
-                info = all_econ[key].get(wb)
-                row[key] = round(info[1], 2) if info and info[1] is not None else ""
-            pop = all_econ["population"].get(wb)
-            row["population"] = int(pop[1]) if pop and pop[1] is not None else ""
-
-        cc_upper = c.upper()
-        row["tiktok_users"] = TIKTOK_USERS.get(cc_upper, "")
-        row["instagram_users"] = INSTAGRAM_USERS.get(cc_upper, "")
-
-        data.append(row)
-
-    data.sort(key=lambda r: r["_sort"], reverse=True)
-
-    rows_as_lists = [[row.get(f, "") for f in fieldnames] for row in data]
-    filtered_rows = [r for r in rows_as_lists if total_dp(r, col_indices) > 90]
-
-    print(f"Before filtering: {len(rows_as_lists)} rows, after: {len(filtered_rows)} rows")
-
-    output_path = f"data/{env_name}_countries.csv"
-    with open(output_path, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(fieldnames)
-        writer.writerows(filtered_rows)
-
-    print(f"Written {len(filtered_rows)} rows to {output_path}")
+print(f"Written {len(data)} rows to {output}")
