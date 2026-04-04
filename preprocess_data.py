@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Preprocess train/test CSVs: quiz column normalization, role frequency filters,
-drop flow_type, and replace empty strings with 'skipped' everywhere.
+drop flow_type, replace empty strings with 'skipped' everywhere, and drop train
+rows whose country_code (from properties) never appears in the test set.
 """
 
 from __future__ import annotations
@@ -181,6 +182,61 @@ def count_column(path: Path, col: str) -> Counter[str]:
     return c
 
 
+def collect_test_country_codes(test_properties: Path) -> frozenset[str]:
+    """Country codes in test properties after the same empty -> skipped normalization."""
+    codes: set[str] = set()
+    with test_properties.open(newline="", encoding="utf-8") as f:
+        r = csv.reader(f)
+        header = next(r)
+        i_cc = header.index("country_code")
+        for row in r:
+            raw = row[i_cc] if len(row) > i_cc else ""
+            codes.add(empty_to_skipped(raw))
+    return frozenset(codes)
+
+
+def collect_allowed_train_user_ids(
+    train_properties: Path, test_countries: frozenset[str]
+) -> tuple[frozenset[str], int]:
+    """Train user_ids whose normalized country_code appears in the test country set.
+
+    Returns (allowed_ids, row_count) where row_count is data rows in properties.
+    """
+    allowed: set[str] = set()
+    n_rows = 0
+    with train_properties.open(newline="", encoding="utf-8") as f:
+        r = csv.reader(f)
+        header = next(r)
+        i_uid = header.index("user_id")
+        i_cc = header.index("country_code")
+        for row in r:
+            n_rows += 1
+            uid = _strip(row[i_uid]) if len(row) > i_uid else ""
+            raw_cc = row[i_cc] if len(row) > i_cc else ""
+            cc = empty_to_skipped(raw_cc)
+            if cc in test_countries:
+                allowed.add(uid)
+    return frozenset(allowed), n_rows
+
+
+def collect_transaction_ids_for_users(
+    purchases_path: Path, allowed_user_ids: frozenset[str]
+) -> frozenset[str]:
+    """Transaction IDs from purchase rows belonging to allowed users."""
+    ids: set[str] = set()
+    with purchases_path.open(newline="", encoding="utf-8") as f:
+        r = csv.reader(f)
+        header = next(r)
+        i_uid = header.index("user_id")
+        i_txn = header.index("transaction_id")
+        for row in r:
+            if len(row) <= max(i_uid, i_txn):
+                continue
+            if _strip(row[i_uid]) in allowed_user_ids:
+                ids.add(_strip(row[i_txn]))
+    return frozenset(ids)
+
+
 def build_role_allowlists(
     train_quiz: Path, test_quiz: Path
 ) -> tuple[frozenset[str], frozenset[str]]:
@@ -241,6 +297,8 @@ def process_csv_quizzes(
     src: Path,
     dst: Path,
     role_allow: frozenset[str],
+    *,
+    allowed_user_ids: frozenset[str] | None = None,
 ) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with src.open(newline="", encoding="utf-8") as fin, dst.open(
@@ -253,29 +311,116 @@ def process_csv_quizzes(
         writer.writerow(new_header)
 
         hmap = {name: i for i, name in enumerate(header)}
+        i_uid = hmap["user_id"]
+        out_i = 0
         for row in reader:
-            # pad row
             max_i = max(hmap.values()) if hmap else -1
             while len(row) <= max_i:
                 row.append("")
+            uid = _strip(row[i_uid])
+            if allowed_user_ids is not None and uid not in allowed_user_ids:
+                continue
             transformed = transform_quiz_row(row, header, role_allow)
-            writer.writerow(apply_empty_skipped_row(transformed))
+            row_out = apply_empty_skipped_row(transformed)
+            if row_out:
+                row_out = list(row_out)
+                row_out[0] = str(out_i)
+            out_i += 1
+            writer.writerow(row_out)
 
 
-def process_csv_generic(src: Path, dst: Path) -> None:
+def _process_csv_generic_impl(
+    src: Path,
+    dst: Path,
+    *,
+    allowed_user_ids: frozenset[str] | None = None,
+    renumber_index: bool = False,
+) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
     with src.open(newline="", encoding="utf-8") as fin, dst.open(
         "w", newline="", encoding="utf-8"
     ) as fout:
         reader = csv.reader(fin)
+        header = next(reader)
         writer = csv.writer(fout)
+        try:
+            i_uid = header.index("user_id")
+        except ValueError:
+            i_uid = None
+        out_i = 0
+        writer.writerow(header)
         for row in reader:
-            writer.writerow(apply_empty_skipped_row(row))
+            while len(row) < len(header):
+                row.append("")
+            if allowed_user_ids is not None and i_uid is not None:
+                uid = _strip(row[i_uid])
+                if uid not in allowed_user_ids:
+                    continue
+            row = apply_empty_skipped_row(row)
+            if renumber_index and row:
+                row = list(row)
+                row[0] = str(out_i)
+                out_i += 1
+            writer.writerow(row)
 
 
-def process_large_csv(src: Path, dst: Path) -> None:
-    """Stream copy with empty -> skipped (same as generic)."""
-    process_csv_generic(src, dst)
+def process_csv_generic(
+    src: Path,
+    dst: Path,
+    *,
+    allowed_user_ids: frozenset[str] | None = None,
+    renumber_index: bool = False,
+) -> None:
+    return _process_csv_generic_impl(
+        src, dst, allowed_user_ids=allowed_user_ids, renumber_index=renumber_index
+    )
+
+
+def process_csv_transaction_attempts(
+    src: Path,
+    dst: Path,
+    allowed_transaction_ids: frozenset[str],
+    *,
+    renumber_index: bool = True,
+) -> None:
+    """Keep rows whose transaction_id is in allowed_transaction_ids."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with src.open(newline="", encoding="utf-8") as fin, dst.open(
+        "w", newline="", encoding="utf-8"
+    ) as fout:
+        reader = csv.reader(fin)
+        header = next(reader)
+        i_txn = header.index("transaction_id")
+        writer = csv.writer(fout)
+        writer.writerow(header)
+        out_i = 0
+        for row in reader:
+            while len(row) <= i_txn:
+                row.append("")
+            tid = _strip(row[i_txn])
+            if tid not in allowed_transaction_ids:
+                continue
+            row = apply_empty_skipped_row(row)
+            if renumber_index and row:
+                row = list(row)
+                row[0] = str(out_i)
+                out_i += 1
+            writer.writerow(row)
+
+
+def process_large_csv(
+    src: Path,
+    dst: Path,
+    *,
+    allowed_user_ids: frozenset[str] | None = None,
+) -> None:
+    """Stream copy with empty -> skipped; optional filter on user_id."""
+    _process_csv_generic_impl(
+        src,
+        dst,
+        allowed_user_ids=allowed_user_ids,
+        renumber_index=allowed_user_ids is not None,
+    )
 
 
 def main() -> None:
@@ -303,7 +448,19 @@ def main() -> None:
 
     train_quiz = root / "train" / "train_users_quizzes.csv"
     test_quiz = root / "test" / "test_users_quizzes.csv"
+    train_props = root / "train" / "train_users_properties.csv"
+    test_props = root / "test" / "test_users_properties.csv"
+    train_purchases_src = root / "train" / "train_users_purchases.csv"
+
     train_roles, test_roles = build_role_allowlists(train_quiz, test_quiz)
+
+    test_country_codes = collect_test_country_codes(test_props)
+    allowed_train_users, n_train_props_rows = collect_allowed_train_user_ids(
+        train_props, test_country_codes
+    )
+    train_txn_ids = collect_transaction_ids_for_users(
+        train_purchases_src, allowed_train_users
+    )
 
     files_train = [
         "train_users.csv",
@@ -323,13 +480,19 @@ def main() -> None:
     ]
 
     process_csv_quizzes(
-        train_quiz, out_root / "train" / "train_users_quizzes.csv", train_roles
+        train_quiz,
+        out_root / "train" / "train_users_quizzes.csv",
+        train_roles,
+        allowed_user_ids=allowed_train_users,
     )
     process_csv_quizzes(
-        test_quiz, out_root / "test" / "test_users_quizzes.csv", test_roles
+        test_quiz,
+        out_root / "test" / "test_users_quizzes.csv",
+        test_roles,
+        allowed_user_ids=None,
     )
 
-    # --- all other files: empty -> skipped only ---
+    # --- all other files: empty -> skipped only; train filtered by country ---
     for name in files_train:
         if name == "train_users_quizzes.csv":
             continue
@@ -338,9 +501,18 @@ def main() -> None:
         if name == "train_users_generations.csv":
             if args.skip_generations:
                 continue
-            process_large_csv(src, dst)
+            process_large_csv(src, dst, allowed_user_ids=allowed_train_users)
+        elif name == "train_users_transaction_attempts.csv":
+            process_csv_transaction_attempts(
+                src, dst, train_txn_ids, renumber_index=True
+            )
         else:
-            process_csv_generic(src, dst)
+            process_csv_generic(
+                src,
+                dst,
+                allowed_user_ids=allowed_train_users,
+                renumber_index=True,
+            )
 
     for name in files_test:
         if name == "test_users_quizzes.csv":
@@ -355,6 +527,13 @@ def main() -> None:
             process_csv_generic(src, dst)
 
     print("Wrote preprocessed files to", out_root.resolve())
+    print("Test country_code values (distinct, after empty->skipped):", len(test_country_codes))
+    print(
+        "Train users kept (country in test set):",
+        len(allowed_train_users),
+        "/",
+        n_train_props_rows,
+    )
     print("Train role allowlist (>=750):", sorted(train_roles))
     print("Test role allowlist (>=4):", sorted(test_roles))
 
