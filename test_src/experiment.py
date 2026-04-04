@@ -1,11 +1,11 @@
 from __future__ import annotations
-
+ 
 import argparse
 import csv
 import math
 import re
 from pathlib import Path
-
+ 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -15,18 +15,25 @@ import pandas as pd
 
 
 FORMULAS_B = [
-    "exp(14 / 8)",
-    "exp(15 / 8)", 
-    "14 / 8",
-    "15 / 8", 
-    "log(14/8)",
-    "log(15/8)",
-    "(14 + 15)",
-    "(14 + 15) / 8",
-    "log((14 + 15) / 8)",
-    "14 / 8 * 11",
-    "14 / 8 / 11",
-    "11 / 14 * 8",
+    "11",
+]
+
+# purchases.csv columns (0-indexed):
+# 0:user_id 1:total_spend 2:spend_Credits_package 3:spend_Gift
+# 4:spend_Reactivation 5:spend_Subscription_Create 6:spend_Subscription_Update
+# 7:spend_Upsell 8:has_Credits_package 9:has_Gift 10:has_Reactivation
+# 11:has_Subscription_Create 12:has_Subscription_Update 13:has_Upsell
+# 14:count_Credits_package 15:count_Gift 16:count_Reactivation
+# 17:count_Subscription_Create 18:count_Subscription_Update 19:count_Upsell
+# 20:highest_single_spend 21:lowest_single_spend 22:mean_spend
+# 23:total_number_of_transactions
+FORMULAS_C = [
+    "2 * 23", 
+]
+
+# b_<idx> = index into FORMULAS_B results, c_<idx> = index into FORMULAS_C results
+INTERACTION_FORMULAS = [
+    "c_0 * b_0",
 ]
 
 
@@ -71,7 +78,7 @@ def tokenize(formula):
         else:
             raise ValueError(f"Unknown character: {s[i]}")
     return tokens
-
+ 
 def parse_expr(tokens, pos):
     left = parse_term(tokens, pos)
     while pos[0] < len(tokens) and tokens[pos[0]][0] == "OP" and tokens[pos[0]][1] in "+-":
@@ -80,7 +87,7 @@ def parse_expr(tokens, pos):
         right = parse_term(tokens, pos)
         left = ("add" if op == "+" else "sub", left, right)
     return left
-
+ 
 def parse_term(tokens, pos):
     left = parse_power(tokens, pos)
     while pos[0] < len(tokens) and tokens[pos[0]][0] == "OP" and tokens[pos[0]][1] in "*/":
@@ -89,7 +96,7 @@ def parse_term(tokens, pos):
         right = parse_power(tokens, pos)
         left = ("mul" if op == "*" else "div", left, right)
     return left
-
+ 
 def parse_power(tokens, pos):
     base = parse_unary(tokens, pos)
     if pos[0] < len(tokens) and tokens[pos[0]] == ("OP", "^"):
@@ -97,14 +104,14 @@ def parse_power(tokens, pos):
         exp = parse_unary(tokens, pos)
         return ("pow", base, exp)
     return base
-
+ 
 def parse_unary(tokens, pos):
     if pos[0] < len(tokens) and tokens[pos[0]] == ("OP", "-"):
         pos[0] += 1
         operand = parse_atom(tokens, pos)
         return ("neg", operand)
     return parse_atom(tokens, pos)
-
+ 
 def parse_atom(tokens, pos):
     if pos[0] >= len(tokens):
         raise ValueError("Unexpected end of formula")
@@ -137,7 +144,7 @@ def parse_atom(tokens, pos):
         else:
             return ("const", float(tok[1]))
     raise ValueError(f"Unexpected token: {tok}")
-
+ 
 def parse_formula(formula):
     tokens = tokenize(formula)
     pos = [0]
@@ -145,7 +152,7 @@ def parse_formula(formula):
     if pos[0] != len(tokens):
         raise ValueError(f"Unexpected token at position {pos[0]}: {tokens[pos[0]:]}")
     return result
-
+ 
 def evaluate(node, row):
     kind = node[0]
     if kind == "col":
@@ -178,27 +185,25 @@ def evaluate(node, row):
         if fname == "pow":
             return args[0] ** args[1]
     raise ValueError(f"Unknown node: {node}")
-
+ 
 def describe(formula, hdr):
     def replace_col(m):
         idx = int(m.group())
         return f'"{hdr[idx]}"' if idx < len(hdr) else f"?{idx}"
     return re.sub(r'(?<![.\d])\b(\d+)\b(?!\.\d)', lambda m: replace_col(m), formula)
-
+ 
 def pearson(va, vb):
-    n = len(va)
-    if n < 2:
+    if len(va) < 2:
         return float("nan")
-    ma = sum(va) / n
-    mb = sum(vb) / n
-    cov = sum((a - ma) * (b - mb) for a, b in zip(va, vb)) / (n - 1)
-    sa = math.sqrt(sum((a - ma) ** 2 for a in va) / (n - 1))
-    sb = math.sqrt(sum((b - mb) ** 2 for b in vb) / (n - 1))
-    if sa == 0 or sb == 0:
+    a = np.array(va, dtype=np.float64)
+    b = np.array(vb, dtype=np.float64)
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 2:
         return float("nan")
-    return cov / (sa * sb)
-
-
+    cc = np.corrcoef(a[mask], b[mask])
+    return float(cc[0, 1])
+ 
+ 
 def read_users(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path, low_memory=False)
     c0 = df.columns[0]
@@ -210,16 +215,16 @@ def read_users(path: Path) -> pd.DataFrame:
         np.where(df["churn_status"] == "invol_churn", 0, np.nan),
     )
     return df[["user_id", "churn", "vol_vs_invol"]]
-
-
+ 
+ 
 def build_country_features(props_path, countries_path):
     props = pd.read_csv(props_path, low_memory=False, dtype={"user_id": str})
     countries = pd.read_csv(countries_path, low_memory=False)
     countries_header = list(countries.columns)
-
+ 
     trees_b = [parse_formula(f) for f in FORMULAS_B]
     labels_b = [describe(f, countries_header) for f in FORMULAS_B]
-
+ 
     country_vals: dict[str, list[float | None]] = {}
     for _, r in countries.iterrows():
         crow = [str(v) for v in r.values]
@@ -232,7 +237,7 @@ def build_country_features(props_path, countries_path):
             except Exception:
                 vals.append(None)
         country_vals[code] = vals
-
+ 
     feat_names = [f"country_B{j}" for j in range(len(FORMULAS_B))]
     records = []
     for _, r in props.iterrows():
@@ -246,18 +251,97 @@ def build_country_features(props_path, countries_path):
         for k, fn in enumerate(feat_names):
             rec[fn] = vals[k]
         records.append(rec)
-
+ 
     return pd.DataFrame(records), feat_names, labels_b
-
-
+ 
+ 
+def build_purchase_features(purchases_path):
+    purchases = pd.read_csv(purchases_path, low_memory=False, dtype={"user_id": str})
+    purchases_header = list(purchases.columns)
+ 
+    trees_c = [parse_formula(f) for f in FORMULAS_C]
+    labels_c = [describe(f, purchases_header) for f in FORMULAS_C]
+ 
+    feat_names = [f"purchase_C{j}" for j in range(len(FORMULAS_C))]
+    records = []
+    for _, r in purchases.iterrows():
+        crow = [str(v) for v in r.values]
+        rec = {"user_id": str(r["user_id"])}
+        for k, (tc, fn) in enumerate(zip(trees_c, feat_names)):
+            try:
+                v = evaluate(tc, crow)
+                rec[fn] = v if math.isfinite(v) else None
+            except Exception:
+                rec[fn] = None
+        records.append(rec)
+ 
+    return pd.DataFrame(records), feat_names, labels_c
+ 
+ 
+def build_interaction_features(df, b_feat_names, c_feat_names, b_labels, c_labels):
+    feat_names = []
+    labels = []
+    for idx, formula in enumerate(INTERACTION_FORMULAS):
+        refs = re.findall(r'[bc]_\d+', formula)
+        ref_to_slot: dict[str, int] = {}
+        slot_to_col: dict[int, str] = {}
+        for ref in refs:
+            if ref in ref_to_slot:
+                continue
+            kind, fidx = ref[0], int(ref[2:])
+            if kind == "b":
+                if fidx >= len(b_feat_names):
+                    raise IndexError(f"b_{fidx} out of range, only {len(b_feat_names)} B features (0..{len(b_feat_names)-1})")
+                col = b_feat_names[fidx]
+            else:
+                if fidx >= len(c_feat_names):
+                    raise IndexError(f"c_{fidx} out of range, only {len(c_feat_names)} C features (0..{len(c_feat_names)-1})")
+                col = c_feat_names[fidx]
+            slot = len(ref_to_slot)
+            ref_to_slot[ref] = slot
+            slot_to_col[slot] = col
+ 
+        numeric_formula = formula
+        for ref in sorted(ref_to_slot, key=len, reverse=True):
+            numeric_formula = numeric_formula.replace(ref, str(ref_to_slot[ref]))
+ 
+        tree = parse_formula(numeric_formula)
+ 
+        label_formula = formula
+        for ref in sorted(ref_to_slot, key=len, reverse=True):
+            kind, fidx = ref[0], int(ref[2:])
+            if kind == "b":
+                label_formula = label_formula.replace(ref, f"B({b_labels[fidx]})")
+            else:
+                label_formula = label_formula.replace(ref, f"C({c_labels[fidx]})")
+ 
+        fn = f"interact_I{idx}"
+        feat_names.append(fn)
+        labels.append(label_formula)
+ 
+        col_list = [slot_to_col[s] for s in range(len(slot_to_col))]
+        vals = []
+        for _, r in df[col_list].iterrows():
+            row = [str(v) for v in r.values]
+            try:
+                v = evaluate(tree, row)
+                vals.append(v if math.isfinite(v) else None)
+            except Exception:
+                vals.append(None)
+        df[fn] = vals
+ 
+    return feat_names, labels
+ 
+ 
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--train-users", type=Path, default=Path("data/preprocessed/train/train_users.csv"))
     p.add_argument("--props", type=Path, default=Path("data/preprocessed/train/train_users_properties.csv"))
     p.add_argument("--countries", type=Path, default=Path("data/countries.csv"))
+    p.add_argument("--purchases", type=Path, default=Path("data/purchases.csv"))
     p.add_argument("--output", type=Path, default=Path("output/churn_country_correlations.png"))
     args = p.parse_args()
-
+ 
     print("Load users...")
     users = read_users(args.train_users)
     print(f"  n users: {len(users)}")
@@ -265,68 +349,87 @@ def main():
     churn_only = users[users["churn"] == 1]
     print(f"  churned users: {len(churn_only)}")
     print(f"  vol_churn share among churned: {churn_only['vol_vs_invol'].mean():.4f}")
-
+ 
     print("Build country features...")
-    country_df, feat_names, labels_b = build_country_features(args.props, args.countries)
+    country_df, b_feat_names, labels_b = build_country_features(args.props, args.countries)
     print(f"  users with country data: {len(country_df)}")
-
+ 
+    print("Build purchase features...")
+    purchase_df, c_feat_names, labels_c = build_purchase_features(args.purchases)
+    print(f"  users with purchase data: {len(purchase_df)}")
+ 
     df = users.merge(country_df, on="user_id", how="inner")
+    df = df.merge(purchase_df, on="user_id", how="left")
+ 
+    print("Build interaction features...")
+    i_feat_names, labels_i = build_interaction_features(df, b_feat_names, c_feat_names, labels_b, labels_c)
+ 
     df_churn_only = df[df["churn"] == 1].copy()
-
-    nb = len(feat_names)
+ 
+    all_feat_names = b_feat_names + c_feat_names + i_feat_names
+    all_labels = labels_b + labels_c + labels_i
+    nf = len(all_feat_names)
+ 
     dep_labels = ["churn (all)", "vol vs invol"]
     nd = len(dep_labels)
-
-    matrix = [[float("nan")] * nd for _ in range(nb)]
-
-    print(f"\n{'Formula B':<55} {'churn':>10} {'vol_vs_invol':>12}")
-    print("-" * 80)
-    for j, (fn, lb) in enumerate(zip(feat_names, labels_b)):
+ 
+    matrix = [[float("nan")] * nd for _ in range(nf)]
+ 
+    print(f"\n{'Formula':<65} {'churn':>10} {'vol_vs_invol':>12}")
+    print("-" * 90)
+    for j, (fn, lb) in enumerate(zip(all_feat_names, all_labels)):
         mask_all = df[fn].notna()
         r_churn = pearson(
             df.loc[mask_all, "churn"].astype(float).tolist(),
             df.loc[mask_all, fn].astype(float).tolist(),
         )
         matrix[j][0] = r_churn
-
+ 
         mask_co = df_churn_only[fn].notna()
         r_vol = pearson(
             df_churn_only.loc[mask_co, "vol_vs_invol"].astype(float).tolist(),
             df_churn_only.loc[mask_co, fn].astype(float).tolist(),
         )
         matrix[j][1] = r_vol
-
-        print(f"{lb:<55} {r_churn:>10.4f} {r_vol:>12.4f}")
-
+ 
+        print(f"{lb:<65} {r_churn:>10.4f} {r_vol:>12.4f}")
+ 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(8, max(6, nb * 0.55)))
+ 
+    fig, ax = plt.subplots(figsize=(8, max(6, nf * 0.55)))
     cmap = plt.cm.RdBu_r
     norm = mcolors.TwoSlopeNorm(vmin=-1, vcenter=0, vmax=1)
-
+ 
     im = ax.imshow(matrix, cmap=cmap, norm=norm, aspect="auto")
     ax.set_xticks(range(nd))
     ax.set_xticklabels(dep_labels, fontsize=10)
-    ax.set_yticks(range(nb))
-    ax.set_yticklabels(labels_b, fontsize=8)
+    ax.set_yticks(range(nf))
+    ax.set_yticklabels(all_labels, fontsize=8)
     ax.set_xlabel("Dependent variable")
-    ax.set_ylabel("Country formula B features")
+    ax.set_ylabel("Features (B=country, C=purchase, I=interaction)")
     ax.set_title("Pearson Correlation")
-
-    for i in range(nb):
+ 
+    nb = len(b_feat_names)
+    nc = len(c_feat_names)
+    if nc > 0:
+        ax.axhline(y=nb - 0.5, color="gray", linewidth=1, linestyle="--")
+    if len(i_feat_names) > 0:
+        ax.axhline(y=nb + nc - 0.5, color="gray", linewidth=1, linestyle="--")
+ 
+    for i in range(nf):
         for j in range(nd):
             val = matrix[i][j]
             if math.isfinite(val):
                 color = "white" if abs(val) > 0.6 else "black"
                 ax.text(j, i, f"{val:.3f}", ha="center", va="center", fontsize=9, color=color, fontweight="bold")
-
+ 
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label("Pearson r")
-
+ 
     plt.tight_layout()
     plt.savefig(str(args.output), dpi=150)
     print(f"\nSaved heatmap to {args.output}")
-
-
+ 
+ 
 if __name__ == "__main__":
     main()
