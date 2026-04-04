@@ -25,6 +25,7 @@ GEN_FEATURE_COLS = [
     "log1p_total_gen",
     "share_video_model_7_times_log1p_gen_total",
     "video_gen_share",
+    "has_any_generation",
     "gen_duration_mean_image",
     "gen_duration_mean_video",
     "gen_duration_median_image",
@@ -204,12 +205,46 @@ def video_gen_count_sum(df: pd.DataFrame) -> pd.Series:
     return df[cols].sum(axis=1).astype(np.float64)
 
 
+def _duration_seconds_from_created_completed(ch: pd.DataFrame) -> pd.DataFrame:
+    """Wall-clock generation time: ``completed_at - created_at`` in seconds.
+
+    Uses only timestamps (not the CSV ``duration`` column). Parses with ``dateutil.isoparse`` so
+    odd years (e.g. synthetic exports) still work; ignores negative or absurd gaps (>7 days).
+    Rows without both timestamps get NaN ``dur``.
+    """
+    ch = ch.copy()
+    if "created_at" not in ch.columns or "completed_at" not in ch.columns:
+        ch["dur"] = np.nan
+        return ch
+
+    cr = ch["created_at"].to_numpy()
+    co = ch["completed_at"].to_numpy()
+    n = len(ch)
+    dur = np.full(n, np.nan, dtype=np.float64)
+    max_s = 7 * 86400.0
+    for i in range(n):
+        try:
+            if pd.isna(cr[i]) or pd.isna(co[i]):
+                continue
+            c = isoparse(str(cr[i]))
+            e = isoparse(str(co[i]))
+            d = (e - c).total_seconds()
+            if 0.0 <= d <= max_s:
+                dur[i] = d
+        except (ValueError, TypeError, OverflowError):
+            continue
+    ch["dur"] = dur
+    return ch
+
+
 def aggregate_duration_mean_for_modality(
     base: pd.DataFrame, gen_path: Path, modality: Literal["image", "video"]
 ) -> pd.DataFrame:
-    """Mean ``duration`` per user for rows whose ``generation_type`` starts with ``image_`` or ``video_``.
+    """Mean wall-clock time (seconds) per user for ``image_`` or ``video_`` rows.
 
-    Non-numeric / missing ``duration`` skipped. Users with no rows of that modality get NaN.
+    Duration is ``completed_at - created_at`` only (same rule for image and video). Rows
+    without both timestamps, or outside 0–7 days, are skipped. Users with no usable rows
+    for that modality get NaN.
     """
     col = "gen_duration_mean_image" if modality == "image" else "gen_duration_mean_video"
     prefix = "image_" if modality == "image" else "video_"
@@ -223,7 +258,7 @@ def aggregate_duration_mean_for_modality(
     for ch in pd.read_csv(
         gen_path,
         chunksize=CHUNK,
-        usecols=["user_id", "generation_type", "duration"],
+        usecols=["user_id", "generation_type", "created_at", "completed_at"],
         low_memory=False,
         dtype={"user_id": str, "generation_type": str},
     ):
@@ -231,7 +266,7 @@ def aggregate_duration_mean_for_modality(
         ch = ch[ch["user_id"].isin(uid_set)]
         if ch.empty:
             continue
-        ch["dur"] = pd.to_numeric(ch["duration"], errors="coerce")
+        ch = _duration_seconds_from_created_completed(ch)
         ch = ch.dropna(subset=["dur"])
         if ch.empty:
             continue
@@ -257,7 +292,10 @@ def aggregate_duration_mean_for_modality(
 def aggregate_duration_median_for_modality_duckdb(
     base: pd.DataFrame, gen_path: Path, modality: Literal["image", "video"]
 ) -> pd.DataFrame:
-    """Median ``duration`` per user for one modality (streaming CSV via DuckDB)."""
+    """Median wall-clock time (seconds) per user for one modality (streaming CSV via DuckDB).
+
+    Same as the mean helpers: ``completed_at - created_at`` only (0–7 days), not CSV ``duration``.
+    """
     try:
         import duckdb
     except ImportError as e:
@@ -276,12 +314,24 @@ def aggregate_duration_median_for_modality_duckdb(
     con.register("base_users", base[["user_id"]].copy())
     gpath = str(gen_path).replace("\\", "/")
     q = f"""
-    SELECT g.user_id,
-      median(try_cast(g.duration AS DOUBLE)) AS {col}
-    FROM read_csv_auto(?) g
-    INNER JOIN base_users b ON g.user_id = b.user_id
-    WHERE starts_with(CAST(g.generation_type AS VARCHAR), '{prefix}')
-    GROUP BY g.user_id
+    SELECT s.user_id,
+      median(CASE WHEN s.dt BETWEEN 0 AND 604800 THEN s.dt END) AS {col}
+    FROM (
+      SELECT g.user_id,
+        CASE
+          WHEN g.created_at IS NOT NULL AND g.completed_at IS NOT NULL
+          THEN date_diff(
+            'microsecond',
+            try_cast(g.created_at AS TIMESTAMP),
+            try_cast(g.completed_at AS TIMESTAMP)
+          ) / 1000000.0
+          ELSE NULL
+        END AS dt
+      FROM read_csv_auto(?) g
+      INNER JOIN base_users b ON g.user_id = b.user_id
+      WHERE starts_with(CAST(g.generation_type AS VARCHAR), '{prefix}')
+    ) s
+    GROUP BY s.user_id
     """
     sub = con.execute(q, [gpath]).df()
     out = base[["user_id"]].merge(sub, on="user_id", how="left")
@@ -323,6 +373,11 @@ def parse_io_args():
     p.add_argument("--train-gen", type=Path, default=root / "train" / "train_users_generations.csv")
     p.add_argument("--test-gen", type=Path, default=root / "test" / "test_users_generations.csv")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--no-impute-mean",
+        action="store_true",
+        help="For generation-duration features: do not fill NaNs with the train split mean.",
+    )
     return p.parse_args()
 
 
@@ -331,6 +386,34 @@ def validate_inputs(paths: dict) -> None:
         if not path.is_file():
             print(f"Missing file: {path}", file=sys.stderr)
             sys.exit(1)
+
+
+def fillna_feature_with_train_mean(
+    df_tr: pd.DataFrame, df_te: pd.DataFrame, col: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Fill NaNs in ``col`` using the mean of non-null **train** values (same scalar for test).
+
+    If every train value is NaN, falls back to ``0.0`` and prints a warning.
+    """
+    mu = df_tr[col].mean(skipna=True)
+    if pd.isna(mu):
+        print(
+            f"  Warning: no non-null train values for {col}; imputing with 0.0",
+            flush=True,
+        )
+        mu = 0.0
+    else:
+        n_na_tr = int(df_tr[col].isna().sum())
+        n_na_te = int(df_te[col].isna().sum())
+        print(
+            f"  Impute {col}: train mean={mu:.6g} (filling {n_na_tr} train, {n_na_te} test NaNs)",
+            flush=True,
+        )
+    df_tr = df_tr.copy()
+    df_te = df_te.copy()
+    df_tr[col] = df_tr[col].fillna(mu)
+    df_te[col] = df_te[col].fillna(mu)
+    return df_tr, df_te
 
 
 def run_inplace_update(
@@ -344,6 +427,7 @@ def run_inplace_update(
     test_props: Path,
     train_gen: Path,
     test_gen: Path,
+    impute_missing_with_train_mean: bool = False,
 ) -> None:
     """Load bases, build single-feature dataframe (user_id + column), merge, write."""
     print(f"Feature: {feature_name}")
@@ -356,6 +440,9 @@ def run_inplace_update(
     df_tr = build_df(base_train, train_gen)
     print("Aggregating test (chunked)...")
     df_te = build_df(base_test, test_gen)
+
+    if impute_missing_with_train_mean:
+        df_tr, df_te = fillna_feature_with_train_mean(df_tr, df_te, feature_name)
 
     users_train = read_csv_drop_index(train_users)
     users_test = read_csv_drop_index(test_users)
@@ -419,4 +506,5 @@ def main_for_feature(feature_name: str) -> None:
         test_props=test_props,
         train_gen=train_gen,
         test_gen=test_gen,
+        impute_missing_with_train_mean=False,
     )
