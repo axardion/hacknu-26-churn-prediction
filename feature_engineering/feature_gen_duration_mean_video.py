@@ -2,8 +2,11 @@
 """
 Append column ``gen_duration_mean_video`` to data/train/train_users.csv and data/test/test_users.csv.
 
-Mean ``duration`` over rows with ``generation_type`` starting with ``video_``; NaN if none.
-Same CLI flags as other feature_* scripts.
+Mean wall-clock time (``completed_at - created_at``, seconds) for rows with
+``generation_type`` starting with ``video_`` (ignores CSV ``duration``).
+
+Missing values are filled with the **train split mean** (same constant for test) unless
+``--no-impute-mean``. Same CLI as other feature_* scripts.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ def main() -> None:
         test_props=test_props,
         train_gen=train_gen,
         test_gen=test_gen,
+        impute_missing_with_train_mean=not args.no_impute_mean,
     )
 
 

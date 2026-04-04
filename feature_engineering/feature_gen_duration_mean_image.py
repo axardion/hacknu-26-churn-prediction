@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Append column ``gen_duration_median_video`` to data/train/train_users.csv and data/test/test_users.csv.
+Append column ``gen_duration_mean_image`` to data/train/train_users.csv and data/test/test_users.csv.
 
-Median wall-clock time (``completed_at - created_at``, seconds) for ``video_`` rows (DuckDB).
-Requires ``pip install duckdb``. Missing values imputed with **train mean** unless ``--no-impute-mean``.
-Same CLI as other feature_* scripts.
+Mean wall-clock time (``completed_at - created_at``, seconds) for rows with
+``generation_type`` starting with ``image_`` (ignores CSV ``duration``).
+
+Missing values are filled with the **train split mean** (same constant applied to test) unless
+``--no-impute-mean`` is passed. Same CLI as other feature_* scripts.
 """
 
 from __future__ import annotations
@@ -12,17 +14,17 @@ from __future__ import annotations
 import pandas as pd
 
 from add_features_generations_common import (
-    aggregate_duration_median_for_modality_duckdb,
+    aggregate_duration_mean_for_modality,
     parse_io_args,
     run_inplace_update,
     validate_inputs,
 )
 
-FEATURE_NAME = "gen_duration_median_video"
+FEATURE_NAME = "gen_duration_mean_image"
 
 
 def build_df(base: pd.DataFrame, gen_path):
-    return aggregate_duration_median_for_modality_duckdb(base, gen_path, "video")
+    return aggregate_duration_mean_for_modality(base, gen_path, "image")
 
 
 def main() -> None:
