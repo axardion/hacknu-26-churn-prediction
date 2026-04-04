@@ -25,7 +25,6 @@ GEN_FEATURE_COLS = [
     "log1p_total_gen",
     "share_video_model_7_times_log1p_gen_total",
     "video_gen_share",
-    "has_any_generation",
     "gen_duration_mean_image",
     "gen_duration_mean_video",
     "gen_duration_median_image",
@@ -205,56 +204,12 @@ def video_gen_count_sum(df: pd.DataFrame) -> pd.Series:
     return df[cols].sum(axis=1).astype(np.float64)
 
 
-def _duration_seconds_with_timestamp_fallback(ch: pd.DataFrame) -> pd.DataFrame:
-    """Set ``dur`` from ``duration`` when numeric; else from ``completed_at - created_at`` (seconds).
-
-    Image rows often omit ``duration`` in the export; wall-clock gap is a usable proxy.
-    Ignores negative or absurd gaps (>7 days).
-
-    Uses ``dateutil.isoparse`` for timestamps: exports may use years outside pandas' datetime
-    range (e.g. year 1067), where ``pd.to_datetime`` becomes NaT and would drop all rows.
-    """
-    ch = ch.copy()
-    ch["dur"] = pd.to_numeric(ch["duration"], errors="coerce")
-    if "created_at" not in ch.columns or "completed_at" not in ch.columns:
-        return ch
-
-    need_fb = ch["dur"].isna().to_numpy()
-    if not need_fb.any():
-        return ch
-
-    cr = ch["created_at"].to_numpy()
-    co = ch["completed_at"].to_numpy()
-    n = len(ch)
-    deltas = np.full(n, np.nan, dtype=np.float64)
-    max_s = 7 * 86400.0
-    for i in range(n):
-        if not need_fb[i]:
-            continue
-        try:
-            if pd.isna(cr[i]) or pd.isna(co[i]):
-                continue
-            c = isoparse(str(cr[i]))
-            e = isoparse(str(co[i]))
-            d = (e - c).total_seconds()
-            if 0.0 <= d <= max_s:
-                deltas[i] = d
-        except (ValueError, TypeError, OverflowError):
-            continue
-
-    fill = need_fb & np.isfinite(deltas)
-    ch.loc[fill, "dur"] = deltas[fill]
-    return ch
-
-
 def aggregate_duration_mean_for_modality(
     base: pd.DataFrame, gen_path: Path, modality: Literal["image", "video"]
 ) -> pd.DataFrame:
-    """Mean duration (seconds) per user for ``image_`` or ``video_`` ``generation_type`` rows.
+    """Mean ``duration`` per user for rows whose ``generation_type`` starts with ``image_`` or ``video_``.
 
-    Uses numeric ``duration`` when present; otherwise ``completed_at - created_at`` when both
-    timestamps exist (common for image generations with empty ``duration``). Users with no
-    usable rows for that modality get NaN.
+    Non-numeric / missing ``duration`` skipped. Users with no rows of that modality get NaN.
     """
     col = "gen_duration_mean_image" if modality == "image" else "gen_duration_mean_video"
     prefix = "image_" if modality == "image" else "video_"
@@ -268,7 +223,7 @@ def aggregate_duration_mean_for_modality(
     for ch in pd.read_csv(
         gen_path,
         chunksize=CHUNK,
-        usecols=["user_id", "generation_type", "duration", "created_at", "completed_at"],
+        usecols=["user_id", "generation_type", "duration"],
         low_memory=False,
         dtype={"user_id": str, "generation_type": str},
     ):
@@ -276,7 +231,7 @@ def aggregate_duration_mean_for_modality(
         ch = ch[ch["user_id"].isin(uid_set)]
         if ch.empty:
             continue
-        ch = _duration_seconds_with_timestamp_fallback(ch)
+        ch["dur"] = pd.to_numeric(ch["duration"], errors="coerce")
         ch = ch.dropna(subset=["dur"])
         if ch.empty:
             continue
@@ -302,11 +257,7 @@ def aggregate_duration_mean_for_modality(
 def aggregate_duration_median_for_modality_duckdb(
     base: pd.DataFrame, gen_path: Path, modality: Literal["image", "video"]
 ) -> pd.DataFrame:
-    """Median duration (seconds) per user for one modality (streaming CSV via DuckDB).
-
-    Same definition as ``aggregate_duration_mean_for_modality``: numeric ``duration`` if present,
-    else ``completed_at - created_at`` in seconds when both parse as timestamps (capped 0–7 days).
-    """
+    """Median ``duration`` per user for one modality (streaming CSV via DuckDB)."""
     try:
         import duckdb
     except ImportError as e:
@@ -326,37 +277,7 @@ def aggregate_duration_median_for_modality_duckdb(
     gpath = str(gen_path).replace("\\", "/")
     q = f"""
     SELECT g.user_id,
-      median(
-        CASE
-          WHEN COALESCE(
-            try_cast(g.duration AS DOUBLE),
-            CASE
-              WHEN try_cast(g.created_at AS TIMESTAMP) IS NOT NULL
-                AND try_cast(g.completed_at AS TIMESTAMP) IS NOT NULL
-              THEN date_diff(
-                'microsecond',
-                try_cast(g.created_at AS TIMESTAMP),
-                try_cast(g.completed_at AS TIMESTAMP)
-              ) / 1000000.0
-              ELSE NULL
-            END
-          ) BETWEEN 0 AND 604800
-          THEN COALESCE(
-            try_cast(g.duration AS DOUBLE),
-            CASE
-              WHEN try_cast(g.created_at AS TIMESTAMP) IS NOT NULL
-                AND try_cast(g.completed_at AS TIMESTAMP) IS NOT NULL
-              THEN date_diff(
-                'microsecond',
-                try_cast(g.created_at AS TIMESTAMP),
-                try_cast(g.completed_at AS TIMESTAMP)
-              ) / 1000000.0
-              ELSE NULL
-            END
-          )
-          ELSE NULL
-        END
-      ) AS {col}
+      median(try_cast(g.duration AS DOUBLE)) AS {col}
     FROM read_csv_auto(?) g
     INNER JOIN base_users b ON g.user_id = b.user_id
     WHERE starts_with(CAST(g.generation_type AS VARCHAR), '{prefix}')

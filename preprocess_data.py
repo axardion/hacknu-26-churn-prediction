@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Preprocess train/test CSVs: quiz column normalization, role frequency filters,
-drop flow_type, replace empty strings with 'skipped' everywhere, and drop train
-rows whose country_code (from properties) never appears in the test set.
+drop flow_type, replace empty strings with 'skipped' everywhere, drop train
+rows whose country_code (from properties) never appears in the test set, and
+drop train rows whose country is in EXCLUDED_TRAIN_COUNTRY_CODES.
 """
 
 from __future__ import annotations
@@ -21,6 +22,10 @@ def _strip(s: str | None) -> str:
 
 def empty_to_skipped(val: str) -> str:
     return "skipped" if _strip(val) == "" else val
+
+
+# Dropped from train (by properties country_code) after the test-country filter.
+EXCLUDED_TRAIN_COUNTRY_CODES = frozenset({"RE", "YE", "MQ", "AI", "GI", "GF"})
 
 
 # --- Quiz transforms ---
@@ -198,7 +203,7 @@ def collect_test_country_codes(test_properties: Path) -> frozenset[str]:
 def collect_allowed_train_user_ids(
     train_properties: Path, test_countries: frozenset[str]
 ) -> tuple[frozenset[str], int]:
-    """Train user_ids whose normalized country_code appears in the test country set.
+    """Train user_ids whose country is in the test set and not in EXCLUDED_TRAIN_COUNTRY_CODES.
 
     Returns (allowed_ids, row_count) where row_count is data rows in properties.
     """
@@ -214,8 +219,11 @@ def collect_allowed_train_user_ids(
             uid = _strip(row[i_uid]) if len(row) > i_uid else ""
             raw_cc = row[i_cc] if len(row) > i_cc else ""
             cc = empty_to_skipped(raw_cc)
-            if cc in test_countries:
-                allowed.add(uid)
+            if cc not in test_countries:
+                continue
+            if cc != "skipped" and cc.upper() in EXCLUDED_TRAIN_COUNTRY_CODES:
+                continue
+            allowed.add(uid)
     return frozenset(allowed), n_rows
 
 
@@ -529,7 +537,9 @@ def main() -> None:
     print("Wrote preprocessed files to", out_root.resolve())
     print("Test country_code values (distinct, after empty->skipped):", len(test_country_codes))
     print(
-        "Train users kept (country in test set):",
+        "Train users kept (country in test set, excluding",
+        sorted(EXCLUDED_TRAIN_COUNTRY_CODES),
+        "):",
         len(allowed_train_users),
         "/",
         n_train_props_rows,
