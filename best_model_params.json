@@ -75,11 +75,11 @@
   },
   "_tuning_meta": {
     "xgb": {
-      "best_roc_auc_churn_pct": 68.50147616583904,
+      "best_roc_auc_churn_pct": 69.36139947128697,
       "label": "fold_0"
     },
     "catboost": {
-      "best_roc_auc_churn_pct": 70.1102176672137,
+      "best_roc_auc_churn_pct": 70.15688768864298,
       "label": "fold_0"
     }
   }
