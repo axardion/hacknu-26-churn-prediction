@@ -7,20 +7,21 @@ from itertools import product
 folder = "data/preprocessed"
 env1 = "train"
 file_path_1 = f"{folder}/{env1}/{env1}_users_purchases.csv"
-SHIFT_DAYS_LIST_1 = [6]
-SHIFT_MONTHS_LIST_1 = [0]
+SHIFT_DAYS_LIST_1 = [4]
+SHIFT_MONTHS_LIST_1 = [4]
 SHIFT_YEARS_LIST_1 = [958]
 
-env2 = "skip_this_file"
+env2 = "test"
 file_path_2 = f"{folder}/{env2}/{env2}_users_purchases.csv"
-SHIFT_DAYS_LIST_2 = [6]
-SHIFT_MONTHS_LIST_2 = [0]
+SHIFT_DAYS_LIST_2 = [4]
+SHIFT_MONTHS_LIST_2 = [4]
 SHIFT_YEARS_LIST_2 = [958]
 
 date_column = "purchase_time"
 amount_column = "purchase_amount_dollars"
 
-os.makedirs("output", exist_ok=True)
+os.makedirs("output/revenue_by_days", exist_ok=True)
+os.makedirs("output/revenue_by_data_points", exist_ok=True)
 
 sources = []
 
@@ -61,29 +62,26 @@ for (d1, mo1, y1), (d2, mo2, y2) in all_combos:
     df = pd.concat(frames, ignore_index=True)
     df["month"] = df[date_column].dt.to_period("M")
 
-    # --- Added: Print overall min/max date ---
-    start_date = df[date_column].min()
-    end_date = df[date_column].max()
-    print(f"Modified Data Time Period: {start_date} to {end_date}")
-    # -----------------------------------------
-
     tag = f"f1_{d1}d_{mo1}m_{y1}y"
     if sources[1][1] is not None:
         tag += f"__f2_{d2}d_{mo2}m_{y2}y"
-    output_path = f"output/revenue/revenue_dynamics_{tag}.png"
 
     monthly_rev = df.groupby("month")[amount_column].sum().sort_index()
     monthly_min = df.groupby("month")[date_column].min().sort_index()
     monthly_max = df.groupby("month")[date_column].max().sort_index()
+    monthly_count = df.groupby("month")[amount_column].count().sort_index()
 
     day_counts = []
-    normalized = []
+    norm_by_days = []
+    norm_by_points = []
     for m in monthly_rev.index:
         actual_days = (monthly_max[m] - monthly_min[m]).days + 1
         day_counts.append(actual_days)
-        normalized.append(monthly_rev[m] / actual_days * 30)
+        norm_by_days.append(monthly_rev[m] / actual_days * 30)
+        norm_by_points.append(monthly_rev[m] / monthly_count[m])
 
-    normalized = pd.Series(normalized, index=monthly_rev.index)
+    norm_by_days = pd.Series(norm_by_days, index=monthly_rev.index)
+    norm_by_points = pd.Series(norm_by_points, index=monthly_rev.index)
 
     x = monthly_rev.index.astype(str)
     step = max(1, len(x) // 20)
@@ -92,6 +90,7 @@ for (d1, mo1, y1), (d2, mo2, y2) in all_combos:
     if sources[1][1] is not None:
         shift_label += f" + F2({d2}d,{mo2}m,{y2}y)"
 
+    # --- revenue_by_days ---
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, 7))
 
     bars1 = ax1.bar(x, monthly_rev.values, color="#4C72B0", edgecolor="white", linewidth=0.3)
@@ -107,7 +106,7 @@ for (d1, mo1, y1), (d2, mo2, y2) in all_combos:
     ax1.spines["top"].set_visible(False)
     ax1.spines["right"].set_visible(False)
 
-    bars2 = ax2.bar(x, normalized.values, color="#DD8452", edgecolor="white", linewidth=0.3)
+    bars2 = ax2.bar(x, norm_by_days.values, color="#DD8452", edgecolor="white", linewidth=0.3)
     for bar in bars2:
         ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() / 2, "30",
                  ha="center", va="center", fontsize=8, fontweight="bold", color="white")
@@ -121,10 +120,43 @@ for (d1, mo1, y1), (d2, mo2, y2) in all_combos:
     ax2.spines["right"].set_visible(False)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
+    plt.savefig(f"output/revenue_by_days/revenue_dynamics_{tag}.png", dpi=150)
     plt.close()
 
-    print(f"Saved to {output_path} | {shift_label} | months: {len(monthly_rev)} | total: ${monthly_rev.sum():,.2f}")
+    # --- revenue_by_data_points ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, 7))
+
+    bars1 = ax1.bar(x, monthly_rev.values, color="#4C72B0", edgecolor="white", linewidth=0.3)
+    for bar, cnt in zip(bars1, monthly_count.values):
+        ax1.text(bar.get_x() + bar.get_width() / 2, bar.get_height() / 2, str(cnt),
+                 ha="center", va="center", fontsize=8, fontweight="bold", color="white")
+    ax1.set_xlabel("Month", fontsize=12)
+    ax1.set_ylabel("Revenue ($)", fontsize=12)
+    ax1.set_title(f"Raw Revenue per Month | {shift_label}", fontsize=12, fontweight="bold")
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.0f}"))
+    ax1.set_xticks(range(0, len(x), step))
+    ax1.set_xticklabels(x[::step], rotation=45, ha="right", fontsize=8)
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+
+    bars2 = ax2.bar(x, norm_by_points.values, color="#55A868", edgecolor="white", linewidth=0.3)
+    for bar, cnt in zip(bars2, monthly_count.values):
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() / 2, str(cnt),
+                 ha="center", va="center", fontsize=8, fontweight="bold", color="white")
+    ax2.set_xlabel("Month", fontsize=12)
+    ax2.set_ylabel("Revenue per Data Point ($)", fontsize=12)
+    ax2.set_title(f"Normalized Revenue (per data point) | {shift_label}", fontsize=12, fontweight="bold")
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"${v:,.2f}"))
+    ax2.set_xticks(range(0, len(x), step))
+    ax2.set_xticklabels(x[::step], rotation=45, ha="right", fontsize=8)
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig(f"output/revenue_by_data_points/revenue_dynamics_{tag}.png", dpi=150)
+    plt.close()
+
+    print(f"Saved {tag} | months: {len(monthly_rev)} | total: ${monthly_rev.sum():,.2f}")
 
     print(f"\n{'Month':<12} {'#1 Price':>10} {'#1 %':>7} {'#2 Price':>10} {'#2 %':>7} {'#3 Price':>10} {'#3 %':>7} {'Total':>8}")
     print("-" * 76)
