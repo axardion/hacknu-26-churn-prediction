@@ -10,7 +10,7 @@ test_countries_file = "data/countries.csv"
 
 user_id_column = "user_id"
 country_code_column = "country_code"
-gdp_growth_column = "gpd_per_capita"
+gdp_growth_column = "gdp_per_capita"
 
 
 def load_csv(path):
