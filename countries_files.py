@@ -88,6 +88,27 @@ with open(countries_csv, newline="") as f:
         uid = row.get("user_id") or row.get("id") or list(row.values())[0]
         country_lookup[uid] = row[country_column]
 
+purchases_csv = "data/purchases_train.csv"
+spend_by_country = defaultdict(list)
+with open(purchases_csv, newline="") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        uid = row.get("user_id") or row.get("id") or list(row.values())[0]
+        country = country_lookup.get(uid)
+        if country is None:
+            continue
+        try:
+            spend_by_country[country].append(float(row["total_spend"]))
+        except (ValueError, KeyError):
+            continue
+
+country_spend_stats = {}
+for country, spends in spend_by_country.items():
+    n = len(spends)
+    avg = sum(spends) / n
+    std = math.sqrt(sum((x - avg) ** 2 for x in spends) / (n - 1)) if n > 1 else 0
+    country_spend_stats[country] = (round(avg, 2), round(std, 2))
+
 stats = defaultdict(lambda: {"vol_churn": 0, "invol_churn": 0, "retained": 0})
 
 with open(payment_csv, newline="") as f:
@@ -193,6 +214,46 @@ INSTAGRAM_USERS = {
     "SR": 200000, "BZ": 100000, "CM": 1500000, "SN": 1200000, "CI": 1000000,
 }
 
+LINKEDIN_USERS = {
+    "US": 257000000, "IN": 161500000, "BR": 83200000, "GB": 47500000, "ID": 35800000,
+    "CA": 28400000, "MX": 27500000, "PH": 20900000, "TR": 19400000, "AU": 17000000,
+    "CO": 16500000, "ZA": 16100000, "AR": 16000000, "PK": 15800000, "EG": 13700000,
+    "NG": 12100000, "SA": 11300000, "PE": 11300000, "BD": 10900000, "MY": 9800000,
+    "AE": 9700000, "VN": 9500000, "CL": 9400000, "FR": 7900000, "RU": 7500000,
+    "MA": 6600000, "TH": 6400000, "CN": 6300000, "UA": 6200000, "KE": 6100000,
+    "VE": 5900000, "DZ": 5300000, "EC": 5300000, "JP": 5300000, "SG": 5000000,
+    "KR": 5000000, "IT": 4100000, "TW": 4100000, "HK": 4000000, "DE": 4000000,
+    "ES": 3500000, "GH": 3300000, "NZ": 3200000, "IL": 3000000, "NL": 3000000,
+    "LK": 2700000, "TN": 2600000, "IQ": 2500000, "DO": 2200000, "NP": 2100000,
+    "JO": 2000000, "CR": 2000000, "BO": 1900000, "GT": 1800000, "KZ": 1800000,
+    "CI": 1700000, "UG": 1700000, "PL": 1700000, "QA": 1700000, "RS": 1700000,
+    "UY": 1600000, "ET": 1600000, "SE": 1600000, "TZ": 1600000, "CM": 1500000,
+    "PA": 1500000, "SN": 1400000, "LB": 1300000, "AO": 1300000, "BE": 1300000,
+    "KW": 1200000, "CH": 1200000, "PR": 1200000, "OM": 1100000, "ZW": 1100000,
+    "PY": 1100000, "AZ": 1100000, "PT": 1100000, "SV": 1100000, "MM": 1100000,
+    "BY": 1100000, "ZM": 1100000,
+}
+
+X_USERS = {
+    "US": 105100000, "JP": 74500000, "ID": 23600000, "PL": 23300000, "IN": 23100000,
+    "GB": 19300000, "TR": 18500000, "DE": 17400000, "MX": 16600000, "SA": 15700000,
+    "TH": 13600000, "HK": 12800000, "FR": 12600000, "KR": 10800000, "CA": 10300000,
+    "ES": 9800000, "NL": 8700000, "PH": 8200000, "SG": 8100000, "FI": 7700000,
+    "VN": 7500000, "NG": 7300000, "AR": 7000000, "TW": 6300000, "CN": 5300000,
+    "CO": 5000000, "MY": 5000000, "IT": 5000000, "AU": 4800000, "EG": 4500000,
+    "ZA": 3100000, "CL": 3100000, "PK": 3000000, "AE": 3000000, "IQ": 2800000,
+    "CH": 2200000, "KE": 2100000, "PE": 2100000, "SE": 1900000, "BR": 1800000,
+    "RO": 1700000, "EC": 1700000, "BE": 1700000, "PT": 1600000, "FM": 1600000,
+    "UA": 1500000, "IE": 1500000, "KW": 1400000, "YE": 1400000, "AT": 1400000,
+    "BD": 1100000, "GH": 1100000, "DZ": 1100000, "CZ": 1100000, "GR": 1100000,
+    "GT": 1000000, "MA": 988400, "NO": 966600, "IL": 955900, "OM": 943400,
+    "DK": 929900, "JO": 820500, "UG": 800500, "BG": 766900, "NZ": 715600,
+    "VE": 698500, "HU": 696100, "KH": 690300, "DO": 679800, "RS": 677800,
+    "QA": 666500, "SV": 641200, "UY": 614800, "PR": 612800, "PY": 572400,
+    "CR": 571500, "LY": 550400, "LB": 533500, "PA": 516500, "RU": 506400,
+    "BO": 501600,
+}
+
 data = []
 econ_keys = set(all_econ["gdp"].keys())
 print(f"Econ data available for: {sorted(econ_keys)[:20]}...")
@@ -235,6 +296,12 @@ for c, s in stats.items():
     cc_upper = c.upper()
     row["tiktok_users"] = TIKTOK_USERS.get(cc_upper, "")
     row["instagram_users"] = INSTAGRAM_USERS.get(cc_upper, "")
+    row["linkedin_users"] = LINKEDIN_USERS.get(cc_upper, "")
+    row["x_users"] = X_USERS.get(cc_upper, "")
+
+    spend = country_spend_stats.get(c)
+    row["avg_total_spend"] = spend[0] if spend else ""
+    row["std_total_spend"] = spend[1] if spend else ""
 
     data.append(row)
 
@@ -253,7 +320,8 @@ fieldnames = [
     "vol_churn", "invol_churn", "retained",
     "vol_churn_pct", "invol_churn_pct", "retained_pct",
     "population", "gdp", "gdp_growth_pct", "gdp_per_capita", "gdp_per_capita_growth_pct", "data_year",
-    "tiktok_users", "instagram_users",
+    "tiktok_users", "instagram_users", "linkedin_users", "x_users",
+    "avg_total_spend", "std_total_spend",
 ]
 with open(output, newline="", mode="w", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
