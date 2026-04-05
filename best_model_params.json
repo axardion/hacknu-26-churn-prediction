@@ -20,13 +20,13 @@
   "catboost": {
     "stage1": {
       "depth": 7,
-      "iterations": 548,
-      "learning_rate": 0.027782415797062296
+      "iterations": 479,
+      "learning_rate": 0.07471658997996457
     },
     "stage2": {
-      "depth": 8,
-      "iterations": 520,
-      "learning_rate": 0.05956290688971576
+      "depth": 5,
+      "iterations": 364,
+      "learning_rate": 0.04652909344843419
     }
   },
   "rf": {
@@ -71,6 +71,16 @@
         "iterations": 485,
         "learning_rate": 0.054664032068637694
       }
+    }
+  },
+  "_tuning_meta": {
+    "xgb": {
+      "best_roc_auc_churn_pct": 68.50147616583904,
+      "label": "fold_0"
+    },
+    "catboost": {
+      "best_roc_auc_churn_pct": 70.1102176672137,
+      "label": "fold_0"
     }
   }
 }
