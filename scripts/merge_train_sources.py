@@ -21,18 +21,18 @@ from pathlib import Path
 
 import pandas as pd
 
-DEFAULT_PREPROCESSED = Path(__file__).resolve().parent.parent / "data" / "preprocessed" / "train"
-DEFAULT_RAW = Path(__file__).resolve().parent.parent / "data" / "train"
-DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "merged" / "train"
+DEFAULT_PREPROCESSED = Path(__file__).resolve().parent.parent / "data" / "preprocessed" / "test"
+DEFAULT_RAW = Path(__file__).resolve().parent.parent / "data" / "test"
+DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "merged" / "test"
 
 # (filename, merge keys)
 TABLE_CONFIG: list[tuple[str, list[str]]] = [
-    ("train_users.csv", ["user_id"]),
-    ("train_users_properties.csv", ["user_id"]),
-    ("train_users_quizzes.csv", ["user_id"]),
-    ("train_users_purchases.csv", ["user_id", "transaction_id"]),
-    ("train_users_transaction_attempts.csv", ["transaction_id"]),
-    ("train_users_generations.csv", ["user_id", "generation_id"]),
+    ("test_users.csv", ["user_id"]),
+    ("test_users_properties.csv", ["user_id"]),
+    ("test_users_quizzes.csv", ["user_id"]),
+    ("test_users_purchases.csv", ["user_id", "transaction_id"]),
+    ("test_users_transaction_attempts.csv", ["transaction_id"]),
+    ("test_users_generations.csv", ["user_id", "generation_id"]),
 ]
 
 
@@ -115,7 +115,7 @@ def main() -> int:
         (fn, keys)
         for fn, keys in TABLE_CONFIG
         if (only is None or fn in only)
-        and (args.include_generations or fn != "train_users_generations.csv")
+        and (args.include_generations or fn != "test_users_generations.csv")
     ]
 
     if only is not None:
@@ -123,6 +123,8 @@ def main() -> int:
         if unknown:
             print(f"Unknown --only names: {sorted(unknown)}", file=sys.stderr)
             return 1
+
+    merged_tables: dict[str, pd.DataFrame] = {}
 
     for filename, keys in tables:
         p_prep = prep_dir / filename
@@ -138,9 +140,32 @@ def main() -> int:
         df_prep = read_csv_clean(p_prep)
         df_raw = read_csv_clean(p_raw)
         merged = merge_pair(df_prep, df_raw, keys)
+        merged_head = merged.head(10)
         out_path = out_dir / filename
-        merged.to_csv(out_path, index=False)
-        print(f"  -> {out_path}  ({len(merged)} rows, {len(merged.columns)} cols)")
+        merged_head.to_csv(out_path, index=False)
+        print(f"  -> {out_path}  ({len(merged_head)} rows, {len(merged_head.columns)} cols)")
+        merged_tables[filename] = merged
+
+    # Combine all tables into one file via user_id
+    if merged_tables:
+        base_name = [fn for fn, _ in tables if fn.endswith("_users.csv")]
+        base_key = base_name[0] if base_name else list(merged_tables.keys())[0]
+        combined = merged_tables.pop(base_key)
+
+        for filename, tbl in merged_tables.items():
+            if "user_id" not in tbl.columns:
+                print(f"  Skip {filename} for combined (no user_id)")
+                continue
+            agg = tbl.groupby("user_id", as_index=False).first()
+            overlap = set(agg.columns) & set(combined.columns) - {"user_id"}
+            if overlap:
+                agg = agg.rename(columns={c: f"{c}__{filename.split('.')[0]}" for c in overlap})
+            combined = combined.merge(agg, on="user_id", how="left")
+
+        combined_head = combined.head(10)
+        combined_path = out_dir / "combined.csv"
+        combined_head.to_csv(combined_path, index=False)
+        print(f"\n  Combined -> {combined_path}  ({len(combined_head)} rows, {len(combined_head.columns)} cols)")
 
     return 0
 
