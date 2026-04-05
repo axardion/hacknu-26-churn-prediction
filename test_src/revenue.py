@@ -11,7 +11,7 @@ SHIFT_DAYS_LIST_1 = [4]
 SHIFT_MONTHS_LIST_1 = [4]
 SHIFT_YEARS_LIST_1 = [958]
 
-env2 = "test"
+env2 = "skip_this_file"
 file_path_2 = f"{folder}/{env2}/{env2}_users_purchases.csv"
 SHIFT_DAYS_LIST_2 = [4]
 SHIFT_MONTHS_LIST_2 = [4]
