@@ -30,7 +30,7 @@ FORMULAS_B = [
 # 20:highest_single_spend 21:lowest_single_spend 22:mean_spend
 # 23:total_number_of_transactions
 FORMULAS_C = [
-    "22",
+    "23",
 ]
 
 # subscription info
@@ -39,16 +39,33 @@ FORMULAS_D = [
     "3",
 ]
 
+# duration info
+FORMULAS_E = [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+]
+
 INTERACTION_FORMULAS = [
-    "(d_0 - c_0) / d_1",
-    "d_1 * b_1",
-    "c_0 / d_0",
-    "c_0 / b_0",
+    "d_0 * e_0",
+    "d_0 * e_1",
+    "d_0 * e_2",
+    "d_0 * e_3",
+    "d_0 * e_4",
+    "d_0 * e_5",
+    "d_0 / e_0",
+    "d_0 / e_1",
+    "d_0 / e_2",
+    "d_0 / e_3",
+    "d_0 / e_4",
+    "d_0 / e_5",
 ]
 
 
 def tokenize(formula):
-
     tokens = []
     i = 0
     s = formula.replace(" ", "")
@@ -312,16 +329,40 @@ def build_subscription_features(subscriptions_path):
     return pd.DataFrame(records), feat_names, labels_d
 
 
-def build_interaction_features(df, b_feat_names, c_feat_names, d_feat_names, b_labels, c_labels, d_labels):
+def build_duration_features(durations_path):
+    durations = pd.read_csv(durations_path, low_memory=False, dtype={"user_id": str})
+    durations_header = list(durations.columns)
+
+    trees_e = [parse_formula(f) for f in FORMULAS_E]
+    labels_e = [describe(f, durations_header) for f in FORMULAS_E]
+
+    feat_names = [f"duration_E{j}" for j in range(len(FORMULAS_E))]
+    records = []
+    for _, r in durations.iterrows():
+        crow = [str(v) for v in r.values]
+        rec = {"user_id": str(r["user_id"])}
+        for k, (te, fn) in enumerate(zip(trees_e, feat_names)):
+            try:
+                v = evaluate(te, crow)
+                rec[fn] = v if math.isfinite(v) else None
+            except Exception:
+                rec[fn] = None
+        records.append(rec)
+
+    return pd.DataFrame(records), feat_names, labels_e
+
+
+def build_interaction_features(df, b_feat_names, c_feat_names, d_feat_names, e_feat_names, b_labels, c_labels, d_labels, e_labels):
     feat_names = []
     labels = []
     all_feat_map = {
         "b": (b_feat_names, b_labels, "B"),
         "c": (c_feat_names, c_labels, "C"),
         "d": (d_feat_names, d_labels, "D"),
+        "e": (e_feat_names, e_labels, "E"),
     }
     for idx, formula in enumerate(INTERACTION_FORMULAS):
-        refs = re.findall(r'[bcd]_\d+', formula)
+        refs = re.findall(r'[bcde]_\d+', formula)
         ref_to_slot: dict[str, int] = {}
         slot_to_col: dict[int, str] = {}
         for ref in refs:
@@ -368,7 +409,7 @@ def build_interaction_features(df, b_feat_names, c_feat_names, d_feat_names, b_l
 def temporal_subset_last_fraction(
     df: pd.DataFrame,
     props_path: Path,
-    fraction: float = 0.3,
+    fraction: float = 0.7,
     date_col: str = "subscription_start_date",
 ) -> pd.DataFrame:
     props = pd.read_csv(props_path, low_memory=False, dtype={"user_id": str})
@@ -388,6 +429,7 @@ def main():
     p.add_argument("--countries", type=Path, default=Path("data/countries.csv"))
     p.add_argument("--purchases", type=Path, default=Path("data/purchases_train.csv"))
     p.add_argument("--subscriptions", type=Path, default=Path("data/subscriptions.csv"))
+    p.add_argument("--durations", type=Path, default=Path("data/durations_train.csv"))
     p.add_argument("--output", type=Path, default=Path("output/churn_country_correlations.png"))
     p.add_argument("--temporal-fraction", type=float, default=0.3)
     args = p.parse_args()
@@ -412,21 +454,28 @@ def main():
     subscription_df, d_feat_names, labels_d = build_subscription_features(args.subscriptions)
     print(f"  users with subscription data: {len(subscription_df)}")
 
+    print("Build duration features...")
+    duration_df, e_feat_names, labels_e = build_duration_features(args.durations)
+    print(f"  users with duration data: {len(duration_df)}")
+
     df = users.merge(country_df, on="user_id", how="inner")
     df = df.merge(purchase_df, on="user_id", how="left")
     df = df.merge(subscription_df, on="user_id", how="left")
+    df = df.merge(duration_df, on="user_id", how="left")
 
     print("Temporal subsetting...")
     df = temporal_subset_last_fraction(df, args.props, fraction=args.temporal_fraction)
 
     print("Build interaction features...")
-    print("Build interaction features...")
-    i_feat_names, labels_i = build_interaction_features(df, b_feat_names, c_feat_names, d_feat_names, labels_b, labels_c, labels_d)
+    i_feat_names, labels_i = build_interaction_features(
+        df, b_feat_names, c_feat_names, d_feat_names, e_feat_names,
+        labels_b, labels_c, labels_d, labels_e,
+    )
 
     df_churn_only = df[df["churn"] == 1].copy()
 
-    all_feat_names = b_feat_names + c_feat_names + d_feat_names + i_feat_names
-    all_labels = labels_b + labels_c + labels_d + labels_i
+    all_feat_names = b_feat_names + c_feat_names + d_feat_names + e_feat_names + i_feat_names
+    all_labels = labels_b + labels_c + labels_d + labels_e + labels_i
     nf = len(all_feat_names)
 
     dep_labels = ["churn (all)", "vol vs invol"]
@@ -465,18 +514,21 @@ def main():
     ax.set_yticks(range(nf))
     ax.set_yticklabels(all_labels, fontsize=8)
     ax.set_xlabel("Dependent variable")
-    ax.set_ylabel("Features (B=country, C=purchase, D=subscription, I=interaction)")
+    ax.set_ylabel("Features (B=country, C=purchase, D=subscription, E=duration, I=interaction)")
     ax.set_title("Pearson Correlation")
 
     nb = len(b_feat_names)
     nc = len(c_feat_names)
     nd_feat = len(d_feat_names)
+    ne = len(e_feat_names)
     if nc > 0:
         ax.axhline(y=nb - 0.5, color="gray", linewidth=1, linestyle="--")
     if nd_feat > 0:
         ax.axhline(y=nb + nc - 0.5, color="gray", linewidth=1, linestyle="--")
-    if len(i_feat_names) > 0:
+    if ne > 0:
         ax.axhline(y=nb + nc + nd_feat - 0.5, color="gray", linewidth=1, linestyle="--")
+    if len(i_feat_names) > 0:
+        ax.axhline(y=nb + nc + nd_feat + ne - 0.5, color="gray", linewidth=1, linestyle="--")
 
     for i in range(nf):
         for j in range(nd):
