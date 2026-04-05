@@ -23,7 +23,6 @@ GEN_FEATURE_COLS = [
     "success_ratio",
     "gen_delta_day1_minus_day14",
     "log1p_total_gen",
-    "share_video_model_7_times_log1p_gen_total",
     "video_gen_share",
     "has_any_generation",
     "gen_duration_mean_image",
